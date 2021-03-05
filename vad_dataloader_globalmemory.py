@@ -10,6 +10,17 @@ from getFlow import *
 import torch.nn.functional as F
 
 
+def np_load_frame_roi(filename, resize_height, resize_width, bbox):
+    (xmin, ymin, xmax, ymax) = bbox
+    image_decoded = cv2.imread(filename)
+    image_decoded = image_decoded[ymin:ymax, xmin:xmax]
+
+    image_resized = cv2.resize(image_decoded, (resize_width, resize_height))
+    # image_resized = image_resized.astype(dtype=np.float32)
+    # image_resized = (image_resized / 127.5) - 1.0
+    return image_resized
+
+
 def np_load_frame(filename, resize_height, resize_width):
     """
     Load image path and convert it to numpy.ndarray. Notes that the color channels are BGR and the color space
@@ -97,22 +108,23 @@ class VadDataset(data.Dataset):
     def __getitem__(self, index):
         # video_name = self.samples[index].split('/')[-2]      #self.samples[index]取到本次迭代取到的视频首帧，根据首帧能够得到其所属类别及图片名
         # frame_name = int(self.samples[index].split('/')[-1].split('.')[-2])
-
         # windows
+
         video_name = os.path.split(os.path.split(self.samples[index])[0])[1]
         frame_name = int(os.path.split(self.samples[index])[1].split('.')[-2])
+        print(video_name)
+        print(frame_name)
 
         if self.bbox_folder is not None:  # 已经提取好了bbox，直接读出来
             # bboxes = self.videos[video_name]['bbox'][frame_name + self._time_step - 1]
             bboxes = self.videos[video_name]['bbox'][frame_name]
         else:  # 需要重新计算
-            frames = [self.videos[video_name]['frame'][frame_name + i] for i in range(self._time_step + self._num_pred)]
-            bboxes = RoI(frames, self.dataset, self.yolo_model, self.yolo_device)
-
-        w_ratio = self._resize_width / self.img_size[1]
+            last_frame = [self.videos[video_name]['frame'][frame_name+i] for i in [self._time_step-1, self._time_step]]
+            bboxes = RoI(last_frame, self.dataset, self.yolo_model, self.yolo_device)
+        w_ratio = self._resize_width / self.img_size[1]      #这里的resize是整张图的resize
         h_ratio = self._resize_height / self.img_size[0]
         trans_bboxes = [[int(box[0] * w_ratio), int(box[1] * h_ratio),
-                         int(box[2] * w_ratio), int(box[3] * h_ratio)] for box in bboxes]
+                         int(box[2] * w_ratio), int(box[3] * h_ratio)] for box in bboxes] # example[(290, 91, 301, 109), (332, 94, 343, 113)]
 
         if self.flow_folder is not None:  # 已经提取好了，直接读出来
             # last_frame_flow = torch.load(self.videos[video_name]['flow'][frame_name + self._time_step - 1])
@@ -123,20 +135,42 @@ class VadDataset(data.Dataset):
                                              self.videos[video_name]['frame'][frame_name + self._time_step],
                                              self.flownet,
                                              self.device, 512, 384)
-
         trans_flow = last_frame_flow.unsqueeze(0)
         trans_flow = F.interpolate(trans_flow, size=([self._resize_width, self._resize_height]), mode='bilinear', align_corners=False)
         trans_flow = trans_flow.squeeze(0)
 
+        # batch = []
+        # for i in range(self._time_step + self._num_pred):
+        #     image = np_load_frame(self.videos[video_name]['frame'][frame_name + i], self._resize_height,
+        #                           self._resize_width)  # 根据首帧图片名便可加载一段视频片段
+        #     if self.transform is not None:
+        #         batch.append(self.transform(image))
+        # batch = torch.stack(batch, dim=0)
+
         batch = []
+        for bbox in bboxes:
+            # img
+            object_batch = []
+            for i in range(self._time_step + self._num_pred):
+                image = np_load_frame_roi(self.videos[video_name]['frame'][frame_name + i], 64,
+                                          64, bbox)  # 这里的resize是裁剪框的resize
+                if self.transform is not None:
+                    object_batch.append(self.transform(image))
+            object_batch = torch.stack(object_batch, dim=0)
+            # print("object_batch.shape: ", object_batch.shape)
+            batch.append(object_batch)
+
+        batch = torch.stack(batch, dim=0)  # 大小为[目标个数, _time_step+num_pred, 图片的通道数, _resize_height, _resize_width]
+
+        batch2 = []
         for i in range(self._time_step + self._num_pred):
             image = np_load_frame(self.videos[video_name]['frame'][frame_name + i], self._resize_height,
                                   self._resize_width)  # 根据首帧图片名便可加载一段视频片段
             if self.transform is not None:
-                batch.append(self.transform(image))
-        batch = torch.stack(batch, dim=0)
+                batch2.append(self.transform(image))
+        batch2 = torch.stack(batch2, dim=0)
 
-        return batch, trans_bboxes, trans_flow  # 最后即返回这段视频片段大小为[_time_step+num_pred, 图片的通道数, _resize_height, _resize_width]
+        return batch, trans_bboxes, trans_flow, batch2
 
     def __len__(self):
         return len(self.samples)
@@ -158,8 +192,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     batch_size = 1
-    datadir = "../AllDatasets/ped2/testing/frames"
-    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+    datadir = "../AllDatasets/avenue/testing/frames"
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
     # flow 和 yolo 在线计算
     # train_data = VadDataset(args, video_folder=datadir, bbox_folder=None, dataset="avenue", flow_folder=None,
@@ -167,9 +201,9 @@ if __name__ == "__main__":
     #                         resize_height=256, resize_width=256)
 
     # 使用保存的.npy
-    train_data = VadDataset(args,video_folder= datadir, bbox_folder = "./bboxes/ped2/test", flow_folder="./flow/ped2/test",
+    train_data = VadDataset(args,video_folder= datadir, bbox_folder = "./bboxes/avenue/test", flow_folder="./flow/avenue/test",
                             transform=transforms.Compose([transforms.ToTensor()]),
-                            resize_height=256, resize_width=256)
+                            resize_height=480, resize_width=640)
 
     # # 仅在线计算flow
     # train_data = VadDataset(video_folder= datadir, bbox_folder = "./bboxes/ped2/test", flow_folder=None,
@@ -189,24 +223,45 @@ if __name__ == "__main__":
 
     unloader = transforms.ToPILImage()
 
-    X, bboxes, flow = next(iter(train_loader))
+    X, bboxes, flow, batch2= next(iter(train_loader))
+
     print(X.shape, flow.shape)
+    print(batch2.shape)
     print(bboxes[0])
+    X = X.squeeze(0)
     # 显示一个batch, pil显示的颜色是有问题的，只是大概看一下
     index = 1
     for i in range(X.shape[0]):
-        for j in range(X.shape[1]):
-            plt.subplot(X.shape[0], X.shape[1], index)
+        for j in range(1):
+            plt.subplot(X.shape[0], 1, index)
             index += 1
-            # print(i,j)
-            # img = X[j,i*3:i*3+3].cpu().clone()
-            img = X[i,j,:,:,:].cpu().clone()
-            img = img.squeeze(0)
-            img = unloader(img)
-            img = np.array(img)
+            img = X[i,j,:,:,:].mul(255).byte()
+            img = img.cpu().numpy().transpose((1,2,0))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # img = X[i,j,:,:,:].cpu().clone()
+            # img = unloader(img)
+            # img = np.array(img)
+            # for bbox in bboxes:
+            #     plot_one_box(bbox, img)
+            plt.imshow(img)
+
+    plt.savefig('objectloss.jpg')
+    plt.close()
+
+    index = 1
+    for i in range(batch2.shape[0]):
+        for j in range(1):
+            plt.subplot(batch2.shape[0], 1, index)
+            index += 1
+            img = batch2[i,j,:,:,:].mul(255).byte()
+            img = img.cpu().numpy().transpose((1,2,0))
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            # img = X[i,j,:,:,:].cpu().clone()
+            # img = unloader(img)
+            # img = np.array(img)
             for bbox in bboxes:
                 plot_one_box(bbox, img)
             plt.imshow(img)
-            plt.imsave('object.jpg', img)
 
-    plt.savefig('objectloss.jpg')
+    print(index)
+    plt.savefig('objectloss2.jpg')

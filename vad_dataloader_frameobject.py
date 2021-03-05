@@ -200,8 +200,6 @@ class VadDataset(data.Dataset):
             object_flow = torch.stack(object_flow, dim=0)
             batch_flow.append(object_flow)
 
-
-
         batch = torch.stack(batch, dim=0)
         batch_flow = torch.stack(batch_flow, dim=0)
         

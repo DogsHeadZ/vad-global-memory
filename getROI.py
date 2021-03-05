@@ -215,10 +215,11 @@ def MergeRoI(roi_boxes):
 def RoI(frames, dataset, model, device):
     yolo_boxes = get_yolo_roi(frames[int(len(frames)/2)], model, device, dataset)
     yolo_boxes = delCoverBboxes(yolo_boxes, dataset)
-    motion_boxes = get_motion_roi(frames, yolo_boxes, dataset)
-
-    bboxes = delCoverBboxes(yolo_boxes+motion_boxes, dataset)
-    return bboxes
+    return yolo_boxes
+    # motion_boxes = get_motion_roi(frames, yolo_boxes, dataset)
+    #
+    # bboxes = delCoverBboxes(yolo_boxes+motion_boxes, dataset)
+    # return bboxes
 
 if __name__=="__main__":
 
@@ -227,14 +228,14 @@ if __name__=="__main__":
     device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
     model = attempt_load(weights, map_location=device)  # load FP32 model
 
-    frame_path = "../AllDatasets/avenue/testing/frames" # frame path
+    frame_path = "../AllDatasets/ped2/testing/frames" # frame path
     clips = os.listdir(frame_path)
 
     # 记录bounding boxes
     for clip in clips:
         path = os.path.join(frame_path,clip)
         filenames = os.listdir(path)  
-        save_file = "./bboxes/avenue/test/"+ str(clip)+".npy"
+        save_file = "./bboxes/ped2/test/"+ str(clip)+".npy"
         clips_roi = []
         #读取图片开始预测
         for index in range(2,len(filenames)-2):       

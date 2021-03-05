@@ -14,10 +14,11 @@ import glob
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
 from torch.autograd import Variable
+from losses import *
 
 
 import utils
-from vad_dataloader_frameflow import VadDataset
+from vad_dataloader_globalmemory import VadDataset
 
 from models.preAE import PreAE
 from models.unet import UNet
@@ -223,7 +224,7 @@ def evaluate(test_dataloader, generator, labels_list, videos, loss_function, dat
     return frame_AUC, roi_AUC
 
 
-def ObjectLoss_evaluate(test_dataloader, generator, labels_list, videos, dataset, device, frame_height=256, frame_width=256,
+def ObjectLoss_evaluate(items, test_dataloader, generator, labels_list, videos, dataset, device, frame_height=256, frame_width=256,
             is_visual=False, mask_labels_path=None, save_path=None, labels_dict=None): 
     #init
     psnr_list = {}
@@ -233,6 +234,8 @@ def ObjectLoss_evaluate(test_dataloader, generator, labels_list, videos, dataset
         roi_psnr_list[key] = []
 
     object_loss = ObjectLoss(device, 2)
+    int_loss = Intensity_Loss(2)
+
 
     video_num = 0
     frame_index = 0
@@ -268,6 +271,7 @@ def ObjectLoss_evaluate(test_dataloader, generator, labels_list, videos, dataset
 
 
     # test
+
     generator.eval()
     for k, (imgs, bboxes, flow) in enumerate(tqdm(test_dataloader, desc='test', leave=False)):
         if k == label_length - 4 * (video_num + 1):
@@ -281,22 +285,39 @@ def ObjectLoss_evaluate(test_dataloader, generator, labels_list, videos, dataset
                 mask_label_list = np.load(mask_labels[video_num], allow_pickle=True)
         imgs = imgs.cuda()
         flow = flow.cuda()
-        input = imgs[:, :-1, ]
-        target = imgs[:, -1, ]
+        inputs = imgs[:, :, :-1, ]
+        targets = imgs[:, :, -1, ]
 
         # print(input.data.shape)
+        object_num = imgs.shape[1]
 
-        outputs = generator(input)  #[c, h, w]
-        # print(outputs.data.shape)
+        min_psnr = None
+        with torch.no_grad():
+            for i in range(object_num):
 
-        mse_imgs = object_loss((outputs + 1) / 2, (target + 1) / 2, flow, bboxes).item()
-        psnr_list[ sorted(videos.keys())[video_num] ].append(utils.psnr(mse_imgs))
+                output, _ = generator(inputs[:, i], bboxes[i], items)
+                target = targets[:, i]
+                mse_imgs = int_loss(output, target)
+                # mse_imgs = object_loss((output + 1) / 2, (target + 1) / 2, flow, bboxes).item()
+                object_psnr = utils.psnr(mse_imgs)
+                if min_psnr is None:
+                    min_psnr = object_psnr
+                if object_psnr < min_psnr:
+                    min_psnr = object_psnr
+
+        psnr_list[sorted(videos.keys())[video_num]].append(min_psnr)
+
+        # outputs = generator(input)  #[c, h, w]
+        # # print(outputs.data.shape)
+        #
+        # mse_imgs = object_loss((outputs + 1) / 2, (target + 1) / 2, flow, bboxes).item()
+        # psnr_list[ sorted(videos.keys())[video_num] ].append(utils.psnr(mse_imgs))
         
 
         if is_visual:
             ################ show predict frame ######################
             real_frame = target.squeeze().data.cpu().numpy().transpose(1,2,0)
-            predict_frame = outputs.squeeze().data.cpu().numpy().transpose(1,2,0)
+            predict_frame = output.squeeze().data.cpu().numpy().transpose(1,2,0)
             # diff = cv2.absdiff(real_frame, predict_frame)
             diff = (real_frame-predict_frame)**2
             diff = np.uint8((diff[:,:,0] + diff[:,:,1] + diff[:,:,2])*255.0)

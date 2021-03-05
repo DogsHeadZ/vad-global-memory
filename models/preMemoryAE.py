@@ -4,6 +4,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .memory import Memory
 
 class Encoder(torch.nn.Module):
     def __init__(self, t_length = 5, n_channel =3):
@@ -137,7 +138,8 @@ class PreAE(torch.nn.Module):
 
 
 class PreAEMemory(torch.nn.Module):
-    def __init__(self, image_channel =3, t_length = 5, image_height = 256, image_width = 256, item_num_w = 8, item_num_h = 8):
+    def __init__(self, image_channel =3, t_length = 5, image_height = 256, image_width = 256, item_num_w = 8, item_num_h = 8,
+                 memory_size = 10, feature_dim = 512, key_dim = 512, temp_update = 0.1, temp_gather=0.1):
         super(PreAEMemory, self).__init__()
 
         self.encoder = Encoder(t_length, image_channel)
@@ -147,8 +149,10 @@ class PreAEMemory(torch.nn.Module):
         # self.items = None
         self.item_num_w = item_num_w
         self.item_num_h = item_num_h
+        self.memory = Memory(memory_size, feature_dim, key_dim, temp_update, temp_gather)
 
-    def forward(self, x, bbox, items):
+
+    def forward(self, x, bbox, memorys):
         x = x.view(x.shape[0], -1, x.shape[-2], x.shape[-1])
         fea, skip1, skip2, skip3 = self.encoder(x)
 
@@ -164,20 +168,15 @@ class PreAEMemory(torch.nn.Module):
 
         index = int(index_h * self.item_num_w + index_w)
 
-        new_fea = self.read(fea,items, index)
-        items = self.update(fea,items.clone(), index)
+        memory = memorys[index]
+
+        new_fea, memory, softmax_score_query, softmax_score_memory, separateness_loss, compactness_loss = self.memory(
+            fea, memory)
+
+        memorys[index] = memory
         output = self.decoder(new_fea, skip1, skip2, skip3)
+
         # if isTrain:
         #     self.items[index] = new_item[0]
-        return output, items
+        return output, fea, new_fea, memorys, softmax_score_query, softmax_score_memory, separateness_loss, compactness_loss
 
-    def read(self, fea, items, index):
-        item = items[index].unsqueeze(0)
-        new_fea = torch.cat((fea, item), dim=1)
-        return new_fea
-
-    def update(self, fea, items, index):
-        cof = 0.01
-        new_item = F.normalize(cof * items[index] + (1 - cof) * fea, dim=1)
-        items[index] = new_item[0]
-        return items
